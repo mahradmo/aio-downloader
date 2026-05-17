@@ -1,0 +1,50 @@
+name: Purge History – Keep Only HEAD
+
+on:
+  workflow_dispatch:  # Manual trigger only – no automation!
+    inputs:
+      confirmation:
+        description: 'Type "CONFIRM" to proceed (this destroys history)'
+        required: true
+        default: ''
+      branch:
+        description: 'Branch to purge (default: main)'
+        required: false
+        default: 'main'
+
+jobs:
+  purge-history:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirmation == 'CONFIRM'
+    steps:
+      - name: Checkout full history (not shallow)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 0          # Full clone, not shallow
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create orphan branch with only HEAD
+        run: |
+          # Save the current commit tree
+          git checkout ${{ github.event.inputs.branch }}
+          git checkout --orphan temp-branch
+          git add -A
+          git commit -m "Truncated history – only latest commit preserved [skip ci]"
+          git branch -D ${{ github.event.inputs.branch }}
+          git branch -m ${{ github.event.inputs.branch }}
+
+      - name: Force push (destroys old history on GitHub)
+        run: |
+          git push origin ${{ github.event.inputs.branch }} --force
+
+      - name: Run garbage collection on remote (optional, GitHub does it eventually)
+        run: |
+          git reflog expire --expire=now --all
+          git gc --prune=now --aggressive
+          git push origin ${{ github.event.inputs.branch }} --force --no-verify

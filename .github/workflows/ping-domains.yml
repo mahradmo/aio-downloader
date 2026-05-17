@@ -1,0 +1,66 @@
+name: Ping Domains
+
+on:
+  workflow_dispatch:
+    inputs:
+      domains:
+        description: >
+          Enter one or more domain names or IP addresses.
+          Separate by commas, spaces, or newlines.
+        required: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse input domains
+        id: parse
+        run: |
+          DOMAINS_INPUT="${{ github.event.inputs.domains }}"
+          # Replace commas and newlines with spaces, then clean up
+          DOMAINS=$(echo "$DOMAINS_INPUT" | tr ',' ' ' | tr '\n' ' ' | tr -s ' ' | sed 's/^ *//;s/ *$//')
+          if [ -z "$DOMAINS" ]; then
+            echo "No domains provided." >&2
+            exit 1
+          fi
+          # Write clean domains, each on its own line (no \r)
+          echo "$DOMAINS" | tr ' ' '\n' | tr -d '\r' > domains.txt
+          echo "Domains to ping (raw view):"
+          cat -A domains.txt   # Shows $ for newline, ^M for carriage return
+          NUM=$(wc -l < domains.txt)
+          echo "NUM_DOMAINS=$NUM" >> $GITHUB_OUTPUT
+
+      - name: Ping each domain (debug mode)
+        run: |
+          index=0
+          while IFS= read -r domain; do
+            index=$((index + 1))
+            # Remove any remaining carriage return just in case
+            domain="${domain//$'\r'/}"
+            # Skip empty lines
+            if [ -z "$domain" ]; then
+              echo "Skipping empty line"
+              continue
+            fi
+            echo "========================================"
+            echo "Pinging: '$domain' (attempt $index)"
+            echo "========================================"
+            # Use ping with a short timeout, show full output
+            if ping -c 4 -W 5 "$domain"; then
+              echo "✅ Ping successful"
+            else
+              EXIT_CODE=$?
+              echo "❌ Ping failed with exit code $EXIT_CODE"
+              # Extra diagnostics
+              echo "Diagnostic:"
+              if command -v getent >/dev/null 2>&1; then
+                getent hosts "$domain" && echo "DNS resolution works" || echo "DNS resolution failed"
+              fi
+              # Test with alternative tool (if ICMP is blocked)
+              if command -v nc >/dev/null 2>&1; then
+                echo "Testing with netcat (TCP 80):"
+                nc -zv -w 3 "$domain" 80 || echo "TCP 80 also failed"
+              fi
+            fi
+            echo ""  # blank line
+          done < domains.txt

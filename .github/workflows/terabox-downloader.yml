@@ -1,0 +1,126 @@
+---
+name: terabox downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: >
+          Enter one or more Terabox share URLs.
+          Separate entries with newlines, commas, or spaces.
+          Example:
+          https://1024terabox.com/s/1ABC1...
+          https://1024terabox.com/s/2XYZ2...
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install tera-dl dependencies
+        run: pip install tqdm requests
+
+      # ── Parse all entries into a JSON array of URLs ──────
+      - name: Parse input URLs
+        id: parse
+        run: |
+          INPUT="${{ github.event.inputs.url }}"
+          # Normalise delimiters: commas → newlines, then trim and filter
+          MODIFIED=$(echo "$INPUT" | tr ',' '\n')
+          URLS='[]'
+          while IFS= read -r line; do
+            line=$(echo "$line" | xargs)   # trim spaces
+            [ -z "$line" ] && continue
+            # Accept only lines that look like a URL
+            if [[ "$line" =~ ^https?:// ]]; then
+              URLS=$(echo "$URLS" | jq --arg u "$line" '. + [$u]')
+            else
+              echo "Skipping non-URL entry: $line"
+            fi
+          done <<< "$MODIFIED"
+
+          URLS_JSON=$(echo "$URLS" | jq -c .)
+          echo "URLS_JSON=$URLS_JSON" >> $GITHUB_OUTPUT
+          COUNT=$(echo "$URLS" | jq length)
+          echo "Parsed $COUNT Terabox URL(s)."
+
+      # ── Download each file inside a dedicated folder ─────
+      - name: Download all files from Terabox
+        run: |
+          URLS_JSON='${{ steps.parse.outputs.URLS_JSON }}'
+          count=$(echo "$URLS_JSON" | jq length)
+          mkdir -p terabox-content terabox
+
+          for ((i=0; i<count; i++)); do
+            url=$(echo "$URLS_JSON" | jq -r ".[$i]")
+            echo "----------------------------------------"
+            echo "Downloading ($((i+1))/$count): $url"
+
+            # Run tera-dl.py inside the content folder.
+            # The script is interactive – pipe "0" to select Direct download.
+            cd terabox-content
+            if echo "0" | python ../tera-dl.py "$url"; then
+              echo "Download succeeded."
+            else
+              echo "ERROR: tera-dl.py failed for $url, skipping."
+            fi
+            cd ..
+          done
+
+      # ── ZIP every downloaded file individually ────────────
+      - name: Zip files individually
+        run: |
+          cd terabox-content
+          shopt -s nullglob
+          for file in *; do
+            [ -f "$file" ] || continue
+            echo "→ Zipping $file"
+            # -j strips the path, -s 99m creates split parts if needed
+            zip -j -s 99m -r "../terabox/${file}.zip" "$file"
+          done
+          cd ..
+
+      # ── Upload all ZIP parts ──────────────────────────────
+      - name: Push to repository
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config http.postBuffer 524288000
+
+          if [ -z "$(ls -A terabox 2>/dev/null)" ]; then
+            echo "No files to upload."
+            exit 0
+          fi
+
+          git add terabox/
+          git commit -m "Add Terabox download [skip ci]" || echo "Nothing to commit"
+
+          RETRIES=5
+          for i in $(seq 1 $RETRIES); do
+            echo "Push attempt $i..."
+            git pull --rebase --autostash origin "$BRANCH"
+            if git push origin "$BRANCH"; then
+              echo "Push succeeded."
+              break
+            else
+              if [ $i -lt $RETRIES ]; then
+                echo "Push rejected, retrying in 3 seconds..."
+                sleep 3
+              else
+                echo "Push failed after $RETRIES attempts."
+                exit 1
+              fi
+            fi
+          done
